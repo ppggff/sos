@@ -187,11 +187,11 @@ struct restore_context_t {
 
     int start_page = 2;
 
-    int pages_per_transaction = 1024;
-    int pages_per_checkpoint = 1024;
-
     int pages_in_transaction = 0;
-    int pages_in_checkpoint = 0;
+    int pages_per_transaction = 1024;
+
+    int transaction_in_checkpoint = 0;
+    int transaction_per_checkpoint = 10;
 
     metrics_t metrics;
 };
@@ -301,9 +301,11 @@ void checkpoint(restore_context_t &ctx, bool restart) {
 
 
 void full_checkpoint(restore_context_t &ctx) {
-    ctx.pages_in_checkpoint = 0;
+    ctx.transaction_in_checkpoint = 0;
     checkpoint(ctx, false);
     checkpoint(ctx, true);
+
+    std::cout << "Checkpoint Done" << std::endl;
 }
 
 void start_transaction(restore_context_t &ctx) {
@@ -328,6 +330,12 @@ void commit_transaction(restore_context_t &ctx, index_leaf_page_t &p) {
         check_error("BtreeCommit", sqlite3BtreeCommit(ctx.btree));
 
         std::cout << "Committed page " << p.pno << std::endl;
+
+        ctx.transaction_in_checkpoint += 1;
+
+        if (ctx.transaction_in_checkpoint > ctx.transaction_per_checkpoint) {
+            full_checkpoint(ctx);
+        }
     }
 }
 
@@ -353,10 +361,6 @@ void restore_page(restore_context_t &ctx, index_leaf_page_t &p, index_leaf_page_
     }
 
     commit_transaction(ctx, p);
-
-    if (ctx.pages_in_checkpoint > ctx.pages_per_checkpoint) {
-        full_checkpoint(ctx);
-    }
 }
 
 void complete_restore(restore_context_t &ctx) {
@@ -419,12 +423,13 @@ void open_and_dump(restore_context_t &ctx, const std::string &file) {
 
 int main(int argc, const char **argv) {
     if (argc < 4) {
-        std::cout << "Version: 0.1.1" << std::endl
+        std::cout << "Version: 0.1.2" << std::endl
                   << "Usage:" << std::endl
-                  << "  bin/sos <start_page_no> [pages_per_checkpoint] [pages_per_transaction]" << std::endl
+                  << "  bin/sos <start_page_no> [pages_per_transaction] [transaction_per_checkpoint]" << std::endl
                   << "    " << "start_page_no: Start page number，must >=2" << std::endl
-                  << "    " << "pages_per_checkpoint: pages per checkpoint interval, default 1024" << std::endl
-                  << "    " << "pages_per_transaction: pages per transaction interval, default 1024" << std::endl;
+                  << "    " << "pages_per_transaction: pages per transaction interval, default 1024" << std::endl
+                  << "    " << "transaction_per_checkpoint: transaction per checkpoint interval, default 10"
+                  << std::endl;
 
         std::exit(1);
     }
@@ -440,19 +445,19 @@ int main(int argc, const char **argv) {
     }
 
     if (argc == 5) {
-        ctx.pages_per_checkpoint = (int) strtol(argv[4], &end, 10);
+        ctx.pages_per_transaction = (int) strtol(argv[4], &end, 10);
 
-        if (end == argv[4] || *end != 0 || ctx.pages_per_checkpoint < 1) {
+        if (end == argv[4] || *end != 0 || ctx.pages_per_transaction < 1) {
             std::cout << "Invalid pages per checkpoint " << argv[4] << std::endl;
             std::exit(1);
         }
     }
 
     if (argc == 6) {
-        ctx.pages_per_transaction = (int) strtol(argv[5], &end, 10);
+        ctx.transaction_per_checkpoint = (int) strtol(argv[5], &end, 10);
 
-        if (end == argv[5] || *end != 0 || ctx.pages_per_transaction < 1) {
-            std::cout << "Invalid pages per transaction " << argv[5] << std::endl;
+        if (end == argv[5] || *end != 0 || ctx.transaction_per_checkpoint < 1) {
+            std::cout << "Invalid transaction per transaction " << argv[5] << std::endl;
             std::exit(1);
         }
     }

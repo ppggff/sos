@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(sos)
+project(sos VERSION 0.1.2)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_VERBOSE_MAKEFILE ON)
