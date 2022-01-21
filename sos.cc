@@ -84,7 +84,7 @@ struct index_cells_t {
 struct payload_t {
     uint64_t payload_body_size = 0;
     std::vector<char> payload;
-    std::vector<int32_t> overflow_pages;
+    std::vector<uint32_t> overflow_pages;
     bool valid = true;
 
     std::string to_string() {
@@ -164,14 +164,21 @@ struct index_page_t {
      *
      * The fifth byte through the last usable byte are used to hold overflow content.
      */
-    void loop_overflow_pages(payload_t &payload, uint64_t done) const {
-        int overflow_page_id = payload.overflow_pages[0];
+    void loop_overflow_pages(payload_t &payload, uint64_t done, uint64_t limit) const {
+        uint32_t overflow_page_id = payload.overflow_pages[0];
 
-        while (overflow_page_id) {
+        while (payload.payload_body_size > done) {
+            if (overflow_page_id > (limit / 4096 + 1) || overflow_page_id == 0) {
+                std::cout << "ERROR: invalid overflow page id " << overflow_page_id << std::endl;
+                payload.valid = false;
+                assert(!"sanity check");
+                return;
+            }
+
             const char *next_page_position = this->base + ((overflow_page_id - 1) * 4096);
-            // XXX: sanity heck
             overflow_page_id = htonl(*(uint32_t *) next_page_position);
-            uint64_t todo = payload.payload.size() - done;
+
+            uint64_t todo = payload.payload_body_size - done;
             todo = todo < usable_size - 4 ? todo : usable_size - 4;
 
             memcpy(payload.payload.data() + done, next_page_position + 4, todo);
@@ -179,7 +186,7 @@ struct index_page_t {
         }
     }
 
-    payload_t get_payload(index_cells_t &cells, int index) const {
+    payload_t get_payload(index_cells_t &cells, int index, uint64_t limit) const {
         payload_t payload{};
 
         uint16_t cell_offset = cells.offsets[index];
@@ -202,12 +209,31 @@ struct index_page_t {
 
         if (payload.payload_body_size > max_embed_payload_size) {
             // overflow
+            uint32_t overflow_page_id = htonl(*(uint32_t *) (payload_body_position + max_embed_payload_size));
+            std::cout << "page: " << this->pno << ", cell: " << index << " has overflow content with page id "
+                      << overflow_page_id << std::endl;
+
+            // sanity check
+            if (overflow_page_id > (limit / 4096 + 1)) {
+                std::cout << "ERROR: invalid overflow page id " << overflow_page_id << std::endl;
+                payload.valid = false;
+                assert(!"sanity check");
+                return std::move(payload);
+            }
+
+            // sanity check
+            if (payload.payload_body_size > this->position - this->base) {
+                std::cout << "ERROR: payload body is too large " << payload.payload_body_size << std::endl;
+                payload.valid = false;
+                assert(!"sanity check");
+                return std::move(payload);
+            }
+
             payload.payload.resize(payload.payload_body_size);
             memcpy(payload.payload.data(), payload_body_position, max_embed_payload_size);
 
-            int overflow_page_id = htonl(*(uint32_t *) (payload_body_position + max_embed_payload_size));
             payload.overflow_pages.push_back(overflow_page_id);
-            loop_overflow_pages(payload, max_embed_payload_size);
+            loop_overflow_pages(payload, max_embed_payload_size, limit);
         } else {
             payload.payload.resize(payload.payload_body_size);
             memcpy(payload.payload.data(), payload_body_position, payload.payload_body_size);
@@ -269,7 +295,7 @@ struct restore_context_t {
 
 void check_error(const std::string &op, int result) {
     if (result) {
-        std::cout << "sqlite failure, operation: " << op << " message: " << sqlite3ErrStr(result);
+        std::cout << "sqlite failure, operation: " << op << " message: " << sqlite3ErrStr(result) << std::endl;
         exit(1);
     }
 }
@@ -328,7 +354,7 @@ void begin_restore(restore_context_t &ctx) {
     int r = sqlite3_test_control(SQLITE_TESTCTRL_RESERVE, ctx.db, sizeof(page_checksum_codec_t::sum_type_t));
 
     if (r != 0) {
-        std::cout << "sqlite3_test_control() failed";
+        std::cout << "ERROR: sqlite3_test_control() failed" << std::endl;
         exit(1);
     }
 
@@ -410,13 +436,13 @@ void commit_transaction(restore_context_t &ctx, index_page_t &p) {
 }
 
 void restore_page(restore_context_t &ctx, index_page_t &p, index_page_header_t &header,
-                  index_cells_t &cells) {
+                  index_cells_t &cells, uint64_t limit) {
     start_transaction(ctx);
 
     ctx.metrics.cells += header.number_of_cell;
 
     for (int i = 0; i < header.number_of_cell; ++i) {
-        payload_t payload = p.get_payload(cells, i);
+        payload_t payload = p.get_payload(cells, i, limit);
 
         if (!payload.valid || payload.payload_body_size == 0) {
             continue;
@@ -458,8 +484,7 @@ void dump_index_page(restore_context_t &ctx, const database_t &db, index_page_t 
     std::cout << "page: " << p.pno << ", " << header.to_string() << std::endl;
 
     index_cells_t cells = p.get_cells(header, p);
-    std::cout << cells.to_string() << std::endl;
-    restore_page(ctx, p, header, cells);
+    restore_page(ctx, p, header, cells, db.size);
 }
 
 void open_and_dump(restore_context_t &ctx, const std::string &file) {
@@ -467,7 +492,7 @@ void open_and_dump(restore_context_t &ctx, const std::string &file) {
 
     int rc = stat(file.data(), &st);
     if (rc != 0) {
-        std::cout << "Cannot stat file " << file << std::endl;
+        std::cout << "ERROR: cannot stat file " << file << std::endl;
         std::exit(1);
     }
 
@@ -475,7 +500,7 @@ void open_and_dump(restore_context_t &ctx, const std::string &file) {
     db.fd = open(file.data(), O_RDONLY);
 
     if (db.fd < 0) {
-        std::cout << "Cannot open file " << file << std::endl;
+        std::cout << "ERROR: cannot open file " << file << std::endl;
         std::exit(1);
     }
 
@@ -497,7 +522,7 @@ void open_and_dump(restore_context_t &ctx, const std::string &file) {
 
 int main(int argc, const char **argv) {
     if (argc < 4) {
-        std::cout << "Version: 0.2.0" << std::endl
+        std::cout << "Version: 0.2.1" << std::endl
                   << "Usage:" << std::endl
                   << "  bin/sos <start_page_no> [pages_per_transaction] [transaction_per_checkpoint]" << std::endl
                   << "    " << "start_page_no: Start page number，must >=2" << std::endl
