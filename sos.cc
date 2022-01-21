@@ -42,8 +42,7 @@ struct index_leaf_page_header_t {
            << " free_block_offset: " << free_block_offset
            << " number_of_cell: " << number_of_cell
            << " cell_region_offset: " << cell_region_offset
-           << " number_of_free_bytes: " << (int) number_of_free_bytes
-           << " right_most_pointer: " << right_most_pointer;
+           << " number_of_free_bytes: " << (int) number_of_free_bytes;
         return ss.str();
     }
 };
@@ -127,10 +126,10 @@ struct index_leaf_page_t {
 
         uint16_t cell_offset = cells.offsets[index];
         const char *payload_header_position = position + cell_offset;
-        const char *payload_body_position = nullptr;
         // A varint which is the total number of bytes of key payload, including any overflow
-        int varint_bytes = varint_decode(&payload.payload_body_size, payload_header_position, &payload_body_position);
-        assert(varint_bytes == payload_body_position - payload_header_position);
+        const char *payload_body_position =
+                payload_header_position + sqlite3GetVarint((const unsigned char *) payload_header_position,
+                                                           (u64 *) &payload.payload_body_size);
 
         if (payload.payload_body_size > 4096) {
             std::cout << "skip payload of cell " << index << ", since its size " << payload.payload_body_size
@@ -355,7 +354,7 @@ void dump_index_leaf_page(restore_context_t &ctx, const database_t &db, index_le
     restore_page(ctx, p, header, cells);
 }
 
-void open_and_dump(restore_context_t &ctx, const std::string &file) {
+void open_and_dump(restore_context_t &ctx, const std::string &file, int start_page) {
     struct stat st{};
 
     int rc = stat(file.data(), &st);

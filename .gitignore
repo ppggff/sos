@@ -5,3 +5,4 @@
 /bin/
 *.tar.gz
 /dist/
+/build-bak/
