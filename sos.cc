@@ -434,6 +434,11 @@ void restore_page(restore_context_t &ctx, index_page_t &p, index_page_header_t &
 }
 
 void complete_restore(restore_context_t &ctx) {
+    if (ctx.pages_in_transaction > 0) {
+        check_error("BtreeCloseCursor", sqlite3BtreeCloseCursor(ctx.cursor));
+        check_error("BtreeCommit", sqlite3BtreeCommit(ctx.btree));
+    }
+
     full_checkpoint(ctx);
 
     check_error("sqlite3_close", sqlite3_close(ctx.db));
