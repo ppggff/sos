@@ -100,7 +100,7 @@ struct index_page_t {
     const int64_t pno = 0;
 
     index_page_t(const char *base, int64_t pno) : base(base), pno(pno) {
-        position = base + ((pno - 1) * 4096);
+        position = base + ((pno - 1) * 4096ll);
     };
 
     bool is_index_leaf() const {
@@ -175,7 +175,7 @@ struct index_page_t {
                 return;
             }
 
-            const char *next_page_position = this->base + ((overflow_page_id - 1) * 4096);
+            const char *next_page_position = this->base + ((overflow_page_id - 1) * 4096ll);
             overflow_page_id = htonl(*(uint32_t *) next_page_position);
 
             uint64_t todo = payload.payload_body_size - done;
