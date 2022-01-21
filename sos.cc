@@ -29,16 +29,12 @@ extern "C" {
 #include "codec.h"
 
 
-struct index_page_header_t {
+struct index_leaf_page_header_t {
     uint8_t flag;                // A value of 10 (0x0a) means the page_t is a leaf index b-tree page_t.
     uint16_t free_block_offset;  // start of the first freeblock on the page_t, or is zero if there are no freeblocks.
     uint16_t number_of_cell;     // number of index_leaf_cells_t on the page_t
     uint16_t cell_region_offset;        // the start of the cell content area. A zero value for this integer is interpreted as 65536.
     int8_t number_of_free_bytes; // number of fragmented free bytes within the cell content area.
-    // The four-byte page number at offset 8 is the right-most pointer.
-    // This value appears in the header of interior b-tree pages only and is omitted from all other pages.
-    uint32_t right_most_pointer = 0;
-
 
     std::string to_string() const {
         std::stringstream ss;
@@ -52,7 +48,7 @@ struct index_page_header_t {
     }
 };
 
-struct index_cells_t {
+struct index_leaf_cells_t {
     std::vector<uint16_t> offsets;
     const char *cell_region_base = nullptr;
 
@@ -88,12 +84,12 @@ struct payload_t {
     }
 };
 
-struct index_page_t {
+struct index_leaf_page_t {
     const char *base;
     const char *position;
     const int64_t pno = 0;
 
-    index_page_t(const char *base, int64_t pno) : base(base), pno(pno) {
+    index_leaf_page_t(const char *base, int64_t pno) : base(base), pno(pno) {
         position = base + ((pno - 1) * 4096);
     };
 
@@ -101,37 +97,23 @@ struct index_page_t {
         return *position == 0x0a;
     }
 
-    bool is_index_interior() const {
-        return *position == 0x02;
-    }
-
-    index_page_header_t get_page_header() const {
-        index_page_header_t header{};
+    index_leaf_page_header_t get_page_header() const {
+        index_leaf_page_header_t header{};
         header.flag = *position;
         header.free_block_offset = htons(*(uint16_t *) (position + 1));
         header.number_of_cell = htons(*(uint16_t *) (position + 3));
         header.cell_region_offset = htons(*(uint16_t *) (position + 5));
         header.number_of_free_bytes = *(int8_t *) (position + 7);
 
-        if (is_index_interior()) {
-            header.right_most_pointer = ntohl(*(uint32_t *) (position + 8));
-        }
-
         return header;
     }
 
-    index_cells_t get_cells(const index_page_header_t &header, index_page_t &p) const {
-        index_cells_t cs;
+    index_leaf_cells_t get_cells(const index_leaf_page_header_t &header) const {
+        index_leaf_cells_t cs;
 
         cs.cell_region_base = position + header.cell_region_offset;
         cs.offsets.resize(header.number_of_cell);
-        const char *off = position;
-
-        if (p.is_index_leaf()) {
-            off += 8;  // The b-tree page header is 8 bytes in size for leaf pages and 12 bytes for interior pages.
-        } else {
-            off += 12;
-        };
+        const char *off = position + 8;  // The b-tree page header is 8 bytes in size for leaf pages
 
         for (int i = 0; i < header.number_of_cell; ++i) {
             cs.offsets[i] = htons(*(int16_t *) (off + (i * 2)));
@@ -140,41 +122,15 @@ struct index_page_t {
         return std::move(cs);
     }
 
-
-    uint64_t calculateEmbedPayloadSize(uint64_t payload_body_size) {
-        const uint64_t page_size = 4096;
-        const uint64_t reserved_page_size = 8;
-        uint64_t usable_size = page_size - reserved_page_size;
-        uint64_t max_local = ((usable_size - 12) * 64 / 255) - 23;
-        uint64_t min_local = ((usable_size - 12) * 32 / 255) - 23;
-        uint64_t surplus = min_local + ((payload_body_size - min_local) % (usable_size - 4));
-
-        if (surplus <= max_local) {
-            return surplus;
-        } else {
-            return min_local;
-        }
-    }
-
-
-    payload_t get_payload(index_cells_t &cells, int index) const {
+    payload_t get_payload(index_leaf_cells_t &cells, int index) const {
         payload_t payload{};
 
         uint16_t cell_offset = cells.offsets[index];
         const char *payload_header_position = position + cell_offset;
-        const char *payload_body_position = payload_header_position;
-
-        // payload.payload_body_size: A varint which is the total number of bytes of key payload, including any overflow
-
-        if (is_index_interior()) {
-            // A 4-byte big-endian page number which is the left child pointer.
-            payload_body_position += 4;
-            payload_body_position += sqlite3GetVarint((const unsigned char *) (payload_header_position + 4),
-                                                      (u64 *) &payload.payload_body_size);
-        } else {
-            payload_body_position += sqlite3GetVarint((const unsigned char *) payload_header_position,
-                                                      (u64 *) &payload.payload_body_size);
-        }
+        const char *payload_body_position = nullptr;
+        // A varint which is the total number of bytes of key payload, including any overflow
+        int varint_bytes = varint_decode(&payload.payload_body_size, payload_header_position, &payload_body_position);
+        assert(varint_bytes == payload_body_position - payload_header_position);
 
         if (payload.payload_body_size > 4096) {
             std::cout << "skip payload of cell " << index << ", since its size " << payload.payload_body_size
@@ -201,8 +157,8 @@ struct database_t {
         return size / 4096;
     }
 
-    index_page_t get_page(int64_t pno) const {
-        return index_page_t{base, pno};
+    index_leaf_page_t get_page(int64_t pno) const {
+        return index_leaf_page_t{base, pno};
     }
 };
 
@@ -342,9 +298,8 @@ void full_checkpoint(restore_context_t &ctx) {
     checkpoint(ctx, true);
 }
 
-
-void restore_page(restore_context_t &ctx, index_page_t &p, index_page_header_t &header,
-                  index_cells_t &cells) {
+void restore_page(restore_context_t &ctx, index_leaf_page_t &p, index_leaf_page_header_t &header,
+                  index_leaf_cells_t &cells) {
     check_error("BtreeBeginTrans", sqlite3BtreeBeginTrans(ctx.btree, true));
 
     sqlite3BtreeCursorZero(ctx.cursor);
@@ -388,18 +343,19 @@ void complete_restore(restore_context_t &ctx) {
  *    The initial portion of the payload that does not spill to overflow pages.
  *    A 4-byte big-endian integer page_t number for the first page_t of the overflow page_t list - omitted if all payload fits on the b-tree page_t.
  */
-void dump_index_page(restore_context_t &ctx, const database_t &db, index_page_t &p) {
+void dump_index_leaf_page(restore_context_t &ctx, const database_t &db, index_leaf_page_t &p) {
     ctx.metrics.pages += 1;
 
-    index_page_header_t header = p.get_page_header();
+    index_leaf_page_header_t header = p.get_page_header();
     std::cout << "page: " << p.pno << ", " << header.to_string() << std::endl;
 
-    index_cells_t cells = p.get_cells(header, p);
+    index_leaf_cells_t cells = p.get_cells(header);
     std::cout << cells.to_string() << std::endl;
+
     restore_page(ctx, p, header, cells);
 }
 
-void open_and_dump(restore_context_t &ctx, const std::string &file, int start_page) {
+void open_and_dump(restore_context_t &ctx, const std::string &file) {
     struct stat st{};
 
     int rc = stat(file.data(), &st);
@@ -421,14 +377,14 @@ void open_and_dump(restore_context_t &ctx, const std::string &file, int start_pa
 
     // loop all pages, page no start from 1
     for (int i = start_page; i < db.get_page_size() + 1; ++i) {
-        index_page_t p = db.get_page(i);
+        index_leaf_page_t p = db.get_page(i);
 
-        if (!p.is_index_leaf() && !p.is_index_interior()) {
+        if (!p.is_index_leaf()) {
             ctx.metrics.skip_pages += 1;
             continue;
         }
 
-        dump_index_page(ctx, db, p);
+        dump_index_leaf_page(ctx, db, p);
     }
 }
 
