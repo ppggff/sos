@@ -522,7 +522,7 @@ void open_and_dump(restore_context_t &ctx, const std::string &file) {
 
 int main(int argc, const char **argv) {
     if (argc < 4) {
-        std::cout << "Version: 0.2.1" << std::endl
+        std::cout << "Version: 0.2.2" << std::endl
                   << "Usage:" << std::endl
                   << "  bin/sos <start_page_no> [pages_per_transaction] [transaction_per_checkpoint]" << std::endl
                   << "    " << "start_page_no: Start page number，must >=2" << std::endl
