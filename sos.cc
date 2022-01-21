@@ -185,6 +185,14 @@ struct restore_context_t {
     page_checksum_codec_t *codec;
     KeyInfo keyInfo;
 
+    int start_page = 2;
+
+    int pages_per_transaction = 1024;
+    int pages_per_checkpoint = 1024;
+
+    int pages_in_transaction = 0;
+    int pages_in_checkpoint = 0;
+
     metrics_t metrics;
 };
 
@@ -293,16 +301,39 @@ void checkpoint(restore_context_t &ctx, bool restart) {
 
 
 void full_checkpoint(restore_context_t &ctx) {
+    ctx.pages_in_checkpoint = 0;
     checkpoint(ctx, false);
     checkpoint(ctx, true);
 }
 
+void start_transaction(restore_context_t &ctx) {
+    if (ctx.pages_in_transaction > 0) {
+        // transaction already started
+        ctx.pages_in_transaction += 1;
+    } else {
+        ctx.pages_in_transaction = 1;
+        check_error("BtreeBeginTrans", sqlite3BtreeBeginTrans(ctx.btree, true));
+
+        sqlite3BtreeCursorZero(ctx.cursor);
+        check_error("BtreeCursor", sqlite3BtreeCursor(ctx.btree, 3, true, &ctx.keyInfo, ctx.cursor));
+    }
+}
+
+void commit_transaction(restore_context_t &ctx, index_leaf_page_t &p) {
+    if (ctx.pages_in_transaction > ctx.pages_per_transaction) {
+        // transaction already started
+        ctx.pages_in_transaction = 0;
+
+        check_error("BtreeCloseCursor", sqlite3BtreeCloseCursor(ctx.cursor));
+        check_error("BtreeCommit", sqlite3BtreeCommit(ctx.btree));
+
+        std::cout << "Committed page " << p.pno << std::endl;
+    }
+}
+
 void restore_page(restore_context_t &ctx, index_leaf_page_t &p, index_leaf_page_header_t &header,
                   index_leaf_cells_t &cells) {
-    check_error("BtreeBeginTrans", sqlite3BtreeBeginTrans(ctx.btree, true));
-
-    sqlite3BtreeCursorZero(ctx.cursor);
-    check_error("BtreeCursor", sqlite3BtreeCursor(ctx.btree, 3, true, &ctx.keyInfo, ctx.cursor));
+    start_transaction(ctx);
 
     ctx.metrics.cells += header.number_of_cell;
 
@@ -321,12 +352,11 @@ void restore_page(restore_context_t &ctx, index_leaf_page_t &p, index_leaf_page_
                 nullptr, 0, 0, 0, 0));
     }
 
-    check_error("BtreeCloseCursor", sqlite3BtreeCloseCursor(ctx.cursor));
-    check_error("BtreeCommit", sqlite3BtreeCommit(ctx.btree));
+    commit_transaction(ctx, p);
 
-    std::cout << "Committed" << std::endl;
-
-    full_checkpoint(ctx);
+    if (ctx.pages_in_checkpoint > ctx.pages_per_checkpoint) {
+        full_checkpoint(ctx);
+    }
 }
 
 void complete_restore(restore_context_t &ctx) {
@@ -354,7 +384,7 @@ void dump_index_leaf_page(restore_context_t &ctx, const database_t &db, index_le
     restore_page(ctx, p, header, cells);
 }
 
-void open_and_dump(restore_context_t &ctx, const std::string &file, int start_page) {
+void open_and_dump(restore_context_t &ctx, const std::string &file) {
     struct stat st{};
 
     int rc = stat(file.data(), &st);
@@ -375,7 +405,7 @@ void open_and_dump(restore_context_t &ctx, const std::string &file, int start_pa
     db.base = (const char *) mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, db.fd, 0);
 
     // loop all pages, page no start from 1
-    for (int i = start_page; i < db.get_page_size() + 1; ++i) {
+    for (int i = ctx.start_page; i < db.get_page_size() + 1; ++i) {
         index_leaf_page_t p = db.get_page(i);
 
         if (!p.is_index_leaf()) {
@@ -389,22 +419,47 @@ void open_and_dump(restore_context_t &ctx, const std::string &file, int start_pa
 
 int main(int argc, const char **argv) {
     if (argc < 4) {
-        std::cout << "Invalid input" << std::endl;
-        std::exit(1);
-    }
+        std::cout << "Version: 0.1.1" << std::endl
+                  << "Usage:" << std::endl
+                  << "  bin/sos <start_page_no> [pages_per_checkpoint] [pages_per_transaction]" << std::endl
+                  << "    " << "start_page_no: Start page number，must >=2" << std::endl
+                  << "    " << "pages_per_checkpoint: pages per checkpoint interval, default 1024" << std::endl
+                  << "    " << "pages_per_transaction: pages per transaction interval, default 1024" << std::endl;
 
-    char *end;
-    int start_page = (int) strtol(argv[3], &end, 10);
-
-    if (end == argv[3] || *end != 0 || start_page < 2) {
-        std::cout << "Invalid start page " << argv[3] << std::endl;
         std::exit(1);
     }
 
     restore_context_t ctx{argv[2]};
 
+    char *end;
+    ctx.start_page = (int) strtol(argv[3], &end, 10);
+
+    if (end == argv[3] || *end != 0 || ctx.start_page < 2) {
+        std::cout << "Invalid start page " << argv[3] << std::endl;
+        std::exit(1);
+    }
+
+    if (argc == 5) {
+        ctx.pages_per_checkpoint = (int) strtol(argv[4], &end, 10);
+
+        if (end == argv[4] || *end != 0 || ctx.pages_per_checkpoint < 1) {
+            std::cout << "Invalid pages per checkpoint " << argv[4] << std::endl;
+            std::exit(1);
+        }
+    }
+
+    if (argc == 6) {
+        ctx.pages_per_transaction = (int) strtol(argv[5], &end, 10);
+
+        if (end == argv[5] || *end != 0 || ctx.pages_per_transaction < 1) {
+            std::cout << "Invalid pages per transaction " << argv[5] << std::endl;
+            std::exit(1);
+        }
+    }
+
+
     begin_restore(ctx);
-    open_and_dump(ctx, argv[1], start_page);
+    open_and_dump(ctx, argv[1]);
     complete_restore(ctx);
 
     std::cout << ctx.metrics.to_string();
