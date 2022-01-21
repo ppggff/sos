@@ -1,0 +1,7 @@
+/.vagrant/
+/cmake-build-debug/
+/data/
+/build/
+/bin/
+*.tar.gz
+/dist/
